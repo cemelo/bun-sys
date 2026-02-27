@@ -1,9 +1,9 @@
 diff --git a/src/bun.js/embed.zig b/src/bun.js/embed.zig
 new file mode 100644
-index 0000000..b72137a
+index 0000000..6987c9d
 --- /dev/null
 +++ b/src/bun.js/embed.zig
-@@ -0,0 +1,1098 @@
+@@ -0,0 +1,1097 @@
 +const EmbedRuntime = struct {
 +    vm: *VirtualMachine,
 +    global: *JSGlobalObject,
