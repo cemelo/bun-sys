@@ -20,37 +20,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build in Docker
+      - name: Install LLVM 19
         run: |
-          docker run --rm \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace \
-            -e BUN_TAG="$BUN_TAG" \
-            -e BUN_VERSION="$BUN_VERSION" \
-            -e BUN_BUILD_JOBS="$(nproc)" \
-            ubuntu:24.04 bash -c '
-              set -euo pipefail
-              apt-get update && apt-get install -y \
-                git cmake ninja-build curl unzip pkg-config \
-                libstdc++-14-dev zstd wget software-properties-common gnupg
-              wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add -
-              echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-19 main" \
-                > /etc/apt/sources.list.d/llvm-19.list
-              apt-get update && apt-get install -y clang-19 lld-19
-              export CC=clang-19 CXX=clang++-19
-              ln -sf /usr/bin/ld.lld-19 /usr/bin/ld.lld
-              curl -fsSL https://bun.sh/install | bash
-              export PATH="$HOME/.bun/bin:$PATH"
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-19 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-19.list
+          sudo apt-get update && sudo apt-get install -y clang-19 lld-19
+          sudo ln -sf /usr/bin/ld.lld-19 /usr/bin/ld.lld
 
-              curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-              source "$HOME/.cargo/env"
-              cargo build --features build-from-source
+      - name: Install system dependencies
+        run: sudo apt-get install -y cmake ninja-build pkg-config zstd
 
-              LIB_DIR=$(find target -path "*/bun-sys-*/out/lib" -type d | head -1)
-              ./build/package-archives.sh "$LIB_DIR" x86_64-unknown-linux-gnu "$BUN_VERSION"
-            '
-        env:
-          BUN_VERSION: "${{ inputs.bun_tag }}"
+      - name: Install Bun
+        run: curl -fsSL https://bun.sh/install | bash
+
+      - name: Install Rust
+        run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+
+      - name: Build from source
+        run: |
+          source "$HOME/.cargo/env"
+          export PATH="$HOME/.bun/bin:$PATH"
+          export CC=clang-19 CXX=clang++-19
+          cargo build --features build-from-source
+
+      - name: Package archive
+        run: |
+          LIB_DIR=$(find target -path "*/bun-sys-*/out/lib" -type d | head -1)
+          ./build/package-archives.sh "$LIB_DIR" x86_64-unknown-linux-gnu "$BUN_VERSION"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -58,49 +55,41 @@ jobs:
           path: dist/*.tar.zst
 
   linux-aarch64:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     env:
       BUN_TAG: "bun-v${{ inputs.bun_tag }}"
       BUN_VERSION: "${{ inputs.bun_tag }}"
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-
-      - name: Build in Docker (aarch64)
+      - name: Install LLVM 19
         run: |
-          docker run --rm --platform linux/arm64 \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace \
-            -e BUN_TAG="$BUN_TAG" \
-            -e BUN_VERSION="$BUN_VERSION" \
-            -e BUN_BUILD_JOBS="$(nproc)" \
-            ubuntu:24.04 bash -c '
-              set -euo pipefail
-              apt-get update && apt-get install -y \
-                git cmake ninja-build curl unzip pkg-config \
-                libstdc++-14-dev zstd wget software-properties-common gnupg
-              wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add -
-              echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-19 main" \
-                > /etc/apt/sources.list.d/llvm-19.list
-              apt-get update && apt-get install -y clang-19 lld-19
-              export CC=clang-19 CXX=clang++-19
-              ln -sf /usr/bin/ld.lld-19 /usr/bin/ld.lld
-              curl -fsSL https://bun.sh/install | bash
-              export PATH="$HOME/.bun/bin:$PATH"
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-19 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-19.list
+          sudo apt-get update && sudo apt-get install -y clang-19 lld-19
+          sudo ln -sf /usr/bin/ld.lld-19 /usr/bin/ld.lld
 
-              curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-              source "$HOME/.cargo/env"
-              cargo build --features build-from-source
+      - name: Install system dependencies
+        run: sudo apt-get install -y cmake ninja-build pkg-config zstd
 
-              LIB_DIR=$(find target -path "*/bun-sys-*/out/lib" -type d | head -1)
-              ./build/package-archives.sh "$LIB_DIR" aarch64-unknown-linux-gnu "$BUN_VERSION"
-            '
-        env:
-          BUN_VERSION: "${{ inputs.bun_tag }}"
+      - name: Install Bun
+        run: curl -fsSL https://bun.sh/install | bash
+
+      - name: Install Rust
+        run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+
+      - name: Build from source
+        run: |
+          source "$HOME/.cargo/env"
+          export PATH="$HOME/.bun/bin:$PATH"
+          export CC=clang-19 CXX=clang++-19
+          cargo build --features build-from-source
+
+      - name: Package archive
+        run: |
+          LIB_DIR=$(find target -path "*/bun-sys-*/out/lib" -type d | head -1)
+          ./build/package-archives.sh "$LIB_DIR" aarch64-unknown-linux-gnu "$BUN_VERSION"
 
       - uses: actions/upload-artifact@v4
         with:
