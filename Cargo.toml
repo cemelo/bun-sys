@@ -8,8 +8,10 @@ license = "MIT"
 repository = "https://github.com/cemelo/bun-sys"
 
 [features]
-default = []
+default = ["bun-1_3_3"]
 build-from-source = []
+bun-1_3_3 = []
+bun-1_3_9 = []
 
 [build-dependencies]
 cc = "1"

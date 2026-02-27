@@ -1,0 +1,14 @@
+diff --git a/cmake/targets/BuildBun.cmake b/cmake/targets/BuildBun.cmake
+index 6b23266..a02f901 100644
+--- a/cmake/targets/BuildBun.cmake
++++ b/cmake/targets/BuildBun.cmake
+@@ -802,7 +802,8 @@ if(BUN_LINK_ONLY)
+   set_target_properties(${bun} PROPERTIES LINKER_LANGUAGE CXX)
+   target_link_libraries(${bun} PRIVATE ${BUN_CPP_OUTPUT})
+ elseif(BUN_CPP_ONLY)
+-  add_library(${bun} STATIC ${BUN_CPP_SOURCES})
++  add_library(${bun} STATIC ${BUN_CPP_SOURCES} ${BUN_ZIG_OUTPUT})
++  add_dependencies(${bun} bun-zig)
+   register_command(
+     TARGET
+       ${bun}
