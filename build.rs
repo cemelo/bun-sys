@@ -14,9 +14,9 @@ const GITHUB_RELEASE_BASE: &str =
 
 /// Per-target checksums for the current crate version.
 const PREBUILT_CHECKSUMS: &[(&str, &str)] = &[
-    ("x86_64-unknown-linux-gnu", "TODO"),
-    ("aarch64-unknown-linux-gnu", "TODO"),
-    ("aarch64-apple-darwin", "TODO"),
+    ("x86_64-unknown-linux-gnu", "5048b26e2ec4bdf59aeef080a712881337bc5c0d4dbab7b25989bdba582c1f56"),
+    ("aarch64-unknown-linux-gnu", "f3b7242009e5fa8ac0f50c8c639d2c611ef658ee85cae6663e24b2cba8fdfcee"),
+    ("aarch64-apple-darwin", "5895cbf19c5823b77027ff523e719bd1ff95d40c4c0e2b581bbdd3164b3935f0"),
 ];
 
 const STATIC_LIBS: &[&str] = &[
@@ -337,6 +337,10 @@ fn build_from_source(out_dir: &Path) -> PathBuf {
         let ver = String::from_utf8_lossy(&osx_ver.stdout);
         let major = ver.trim().split('.').next().unwrap_or("15");
         cmake.arg(format!("-DCMAKE_OSX_DEPLOYMENT_TARGET={major}"));
+
+        if let Ok(sysroot) = env::var("CMAKE_OSX_SYSROOT") {
+            cmake.arg(format!("-DCMAKE_OSX_SYSROOT={sysroot}"));
+        }
     }
 
     run(&mut cmake);

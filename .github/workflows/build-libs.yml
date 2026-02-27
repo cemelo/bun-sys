@@ -20,13 +20,13 @@ jobs:
           echo "BUN_VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "BUN_TAG=bun-v$VERSION" >> "$GITHUB_ENV"
 
-      - name: Install LLVM 19
+      - name: Install LLVM 21
         run: |
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
-          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-19 main" \
-            | sudo tee /etc/apt/sources.list.d/llvm-19.list
-          sudo apt-get update && sudo apt-get install -y clang-19 lld-19
-          sudo ln -sf /usr/bin/ld.lld-19 /usr/bin/ld.lld
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-21.list
+          sudo apt-get update && sudo apt-get install -y clang-21 lld-21
+          sudo ln -sf /usr/bin/ld.lld-21 /usr/bin/ld.lld
 
       - name: Install system dependencies
         run: sudo apt-get install -y cmake ninja-build pkg-config zstd
@@ -41,7 +41,7 @@ jobs:
         run: |
           source "$HOME/.cargo/env"
           export PATH="$HOME/.bun/bin:$PATH"
-          export CC=clang-19 CXX=clang++-19
+          export CC=clang-21 CXX=clang++-21
           cargo build --features build-from-source
 
       - name: Package archive
@@ -65,13 +65,13 @@ jobs:
           echo "BUN_VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "BUN_TAG=bun-v$VERSION" >> "$GITHUB_ENV"
 
-      - name: Install LLVM 19
+      - name: Install LLVM 21
         run: |
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
-          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-19 main" \
-            | sudo tee /etc/apt/sources.list.d/llvm-19.list
-          sudo apt-get update && sudo apt-get install -y clang-19 lld-19
-          sudo ln -sf /usr/bin/ld.lld-19 /usr/bin/ld.lld
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-21.list
+          sudo apt-get update && sudo apt-get install -y clang-21 lld-21
+          sudo ln -sf /usr/bin/ld.lld-21 /usr/bin/ld.lld
 
       - name: Install system dependencies
         run: sudo apt-get install -y cmake ninja-build pkg-config zstd
@@ -86,7 +86,7 @@ jobs:
         run: |
           source "$HOME/.cargo/env"
           export PATH="$HOME/.bun/bin:$PATH"
-          export CC=clang-19 CXX=clang++-19
+          export CC=clang-21 CXX=clang++-21
           cargo build --features build-from-source
 
       - name: Package archive
@@ -111,7 +111,7 @@ jobs:
           echo "BUN_TAG=bun-v$VERSION" >> "$GITHUB_ENV"
 
       - name: Install dependencies
-        run: brew install cmake ninja zstd
+        run: brew install cmake ninja zstd llvm@21
 
       - name: Install Bun
         run: curl -fsSL https://bun.sh/install | bash
@@ -122,7 +122,8 @@ jobs:
       - name: Build from source
         run: |
           source "$HOME/.cargo/env"
-          export PATH="$HOME/.bun/bin:$PATH"
+          export PATH="$HOME/.bun/bin:$(brew --prefix llvm@21)/bin:$PATH"
+          export CC=clang CXX=clang++
           cargo build --features build-from-source
 
       - name: Package archive

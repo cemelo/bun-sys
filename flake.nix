@@ -24,8 +24,9 @@
             pkgs-unstable.ninja
             pkgs-unstable.pkg-config
             pkgs-unstable.ccache
-            pkgs-unstable.llvm_19
-            pkgs-unstable.lld_19
+            pkgs-unstable.clang_21
+            pkgs-unstable.llvm_21
+            pkgs-unstable.lld_21
             pkgs-unstable.python3
             pkgs-unstable.libtool
             pkgs-unstable.ruby
@@ -39,6 +40,16 @@
           ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
             pkgs-unstable.apple-sdk_15
           ];
+
+          devshell.startup.setup = {
+            text = ''
+              if [[ "$OSTYPE" == "darwin"* ]]; then
+                export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+                export CMAKE_OSX_SYSROOT="$SDKROOT"
+                export NIX_CFLAGS_COMPILE="''${NIX_CFLAGS_COMPILE:-} -isysroot $SDKROOT"
+              fi
+            '';
+          };
         };
       });
 }

@@ -31,7 +31,7 @@ dependencies = [
 
 [[package]]
 name = "bun-sys"
-version = "0.0.1"
+version = "1.3.9"
 dependencies = [
  "cc",
  "sha2",
