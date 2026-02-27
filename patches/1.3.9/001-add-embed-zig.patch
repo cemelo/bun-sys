@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..6987c9d
 --- /dev/null
 +++ b/src/bun.js/embed.zig
-@@ -0,0 +1,1097 @@
+@@ -0,0 +1,1098 @@
 +const EmbedRuntime = struct {
 +    vm: *VirtualMachine,
 +    global: *JSGlobalObject,
@@ -687,7 +687,7 @@ index 0000000..6987c9d
 +
 +            const global = self.rt.global;
 +            const err_str = bun.String.init(self.error_message);
-+            const err_val = err_str.toJS(global);
++            const err_val = err_str.toJS(global) catch return;
 +            const promise: *JSInternalPromise = @ptrCast(promise_val.asCell());
 +            try promise.reject(global, err_val);
 +        }
@@ -913,7 +913,8 @@ index 0000000..6987c9d
 +export fn bun_jsvalue_string(global: ?*anyopaque, s: [*]const u8, len: usize) callconv(.c) u64 {
 +    const g: *JSGlobalObject = @ptrCast(@alignCast(global orelse return jsValueToRaw(.js_undefined)));
 +    const str = bun.String.init(s[0..len]);
-+    return jsValueToRaw(str.toJS(g));
++    const js_val = str.toJS(g) catch return jsValueToRaw(.js_undefined);
++    return jsValueToRaw(js_val);
 +}
 +
 +export fn bun_jsvalue_object(global: ?*anyopaque) callconv(.c) u64 {
