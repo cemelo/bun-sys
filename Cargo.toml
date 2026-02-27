@@ -1,6 +1,6 @@
 [package]
-name = "bun-sys"
-version = "1.3.9"
+name = "libbun-sys"
+version = "0.1.0+1.3.9"
 edition = "2021"
 links = "bun"
 description = "Raw FFI bindings for embedding Bun as a static library"

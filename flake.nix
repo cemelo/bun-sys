@@ -47,6 +47,7 @@
                 export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
                 export CMAKE_OSX_SYSROOT="$SDKROOT"
                 export NIX_CFLAGS_COMPILE="''${NIX_CFLAGS_COMPILE:-} -isysroot $SDKROOT"
+                export LIBRARY_PATH="''${LIBRARY_PATH:+$LIBRARY_PATH:}$SDKROOT/usr/lib"
               fi
             '';
           };

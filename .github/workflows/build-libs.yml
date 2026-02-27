@@ -1,24 +1,29 @@
-name: Build pre-built libraries
+name: Build + Release + Publish
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
+    inputs:
+      bun_version:
+        description: "Bun version to build (e.g. 1.3.9)"
+        required: true
+        type: string
 
 permissions:
   contents: write
 
+env:
+  BUN_VERSION: ${{ inputs.bun_version }}
+  BUN_TAG: bun-v${{ inputs.bun_version }}
+
 jobs:
-  linux-x86_64:
+  # ---------------------------------------------------------------------------
+  # Build jobs (parallel)
+  # ---------------------------------------------------------------------------
+
+  build-linux-x86_64:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Derive version from tag
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "BUN_VERSION=$VERSION" >> "$GITHUB_ENV"
-          echo "BUN_TAG=bun-v$VERSION" >> "$GITHUB_ENV"
 
       - name: Install LLVM 21
         run: |
@@ -46,7 +51,7 @@ jobs:
 
       - name: Package archive
         run: |
-          LIB_DIR=$(find target -path "*/bun-sys-*/out/lib" -type d | head -1)
+          LIB_DIR=$(find target -path "*/out/lib" -type d | head -1)
           ./build/package-archives.sh "$LIB_DIR" x86_64-unknown-linux-gnu "$BUN_VERSION"
 
       - uses: actions/upload-artifact@v4
@@ -54,16 +59,10 @@ jobs:
           name: libs-linux-x86_64
           path: dist/*.tar.zst
 
-  linux-aarch64:
+  build-linux-aarch64:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-
-      - name: Derive version from tag
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "BUN_VERSION=$VERSION" >> "$GITHUB_ENV"
-          echo "BUN_TAG=bun-v$VERSION" >> "$GITHUB_ENV"
 
       - name: Install LLVM 21
         run: |
@@ -91,7 +90,7 @@ jobs:
 
       - name: Package archive
         run: |
-          LIB_DIR=$(find target -path "*/bun-sys-*/out/lib" -type d | head -1)
+          LIB_DIR=$(find target -path "*/out/lib" -type d | head -1)
           ./build/package-archives.sh "$LIB_DIR" aarch64-unknown-linux-gnu "$BUN_VERSION"
 
       - uses: actions/upload-artifact@v4
@@ -99,16 +98,10 @@ jobs:
           name: libs-linux-aarch64
           path: dist/*.tar.zst
 
-  darwin-aarch64:
+  build-darwin-aarch64:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-
-      - name: Derive version from tag
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "BUN_VERSION=$VERSION" >> "$GITHUB_ENV"
-          echo "BUN_TAG=bun-v$VERSION" >> "$GITHUB_ENV"
 
       - name: Install dependencies
         run: brew install cmake ninja zstd llvm@21
@@ -128,7 +121,7 @@ jobs:
 
       - name: Package archive
         run: |
-          LIB_DIR=$(find target -path "*/bun-sys-*/out/lib" -type d | head -1)
+          LIB_DIR=$(find target -path "*/out/lib" -type d | head -1)
           ./build/package-archives.sh "$LIB_DIR" aarch64-apple-darwin "$BUN_VERSION"
 
       - uses: actions/upload-artifact@v4
@@ -136,9 +129,17 @@ jobs:
           name: libs-darwin-aarch64
           path: dist/*.tar.zst
 
+  # ---------------------------------------------------------------------------
+  # Create GitHub release
+  # ---------------------------------------------------------------------------
+
   create-release:
-    needs: [linux-x86_64, linux-aarch64, darwin-aarch64]
+    needs: [build-linux-x86_64, build-linux-aarch64, build-darwin-aarch64]
     runs-on: ubuntu-latest
+    outputs:
+      sha_x86_64_linux: ${{ steps.checksums.outputs.sha_x86_64_linux }}
+      sha_aarch64_linux: ${{ steps.checksums.outputs.sha_aarch64_linux }}
+      sha_aarch64_darwin: ${{ steps.checksums.outputs.sha_aarch64_darwin }}
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -146,19 +147,165 @@ jobs:
           merge-multiple: true
 
       - name: Compute checksums
+        id: checksums
         run: |
           cd artifacts
           sha256sum *.tar.zst | tee checksums-sha256.txt
 
+          sha_x86_64_linux=$(sha256sum "bun-libs-v${BUN_VERSION}-x86_64-unknown-linux-gnu.tar.zst" | awk '{print $1}')
+          sha_aarch64_linux=$(sha256sum "bun-libs-v${BUN_VERSION}-aarch64-unknown-linux-gnu.tar.zst" | awk '{print $1}')
+          sha_aarch64_darwin=$(sha256sum "bun-libs-v${BUN_VERSION}-aarch64-apple-darwin.tar.zst" | awk '{print $1}')
+
+          echo "sha_x86_64_linux=$sha_x86_64_linux" >> "$GITHUB_OUTPUT"
+          echo "sha_aarch64_linux=$sha_aarch64_linux" >> "$GITHUB_OUTPUT"
+          echo "sha_aarch64_darwin=$sha_aarch64_darwin" >> "$GITHUB_OUTPUT"
+
+      - name: Create git tag
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = `libs-v${process.env.BUN_VERSION}`;
+            // Delete existing tag if present (re-runs)
+            try {
+              await github.rest.git.deleteRef({ owner: context.repo.owner, repo: context.repo.repo, ref: `tags/${tag}` });
+            } catch (e) {
+              if (e.status !== 422 && e.status !== 404) throw e;
+            }
+            await github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: `refs/tags/${tag}`,
+              sha: context.sha,
+            });
+
       - name: Create GitHub release
+        env:
+          SHA_X86_64_LINUX: ${{ steps.checksums.outputs.sha_x86_64_linux }}
+          SHA_AARCH64_LINUX: ${{ steps.checksums.outputs.sha_aarch64_linux }}
+          SHA_AARCH64_DARWIN: ${{ steps.checksums.outputs.sha_aarch64_darwin }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "${{ github.ref_name }}"
-          name: "bun-sys ${{ github.ref_name }}"
+          tag_name: libs-v${{ inputs.bun_version }}
+          name: "libbun-sys libs-v${{ inputs.bun_version }}"
           body: |
-            Pre-built static libraries for bun-sys ${{ github.ref_name }}.
+            Pre-built static libraries for libbun-sys targeting Bun ${{ inputs.bun_version }}.
 
-            Update the `PREBUILT_CHECKSUMS` in `build.rs` with the values from `checksums-sha256.txt`.
+            ## Checksums (SHA-256)
+            ```
+            ${{ steps.checksums.outputs.sha_x86_64_linux }}  bun-libs-v${{ inputs.bun_version }}-x86_64-unknown-linux-gnu.tar.zst
+            ${{ steps.checksums.outputs.sha_aarch64_linux }}  bun-libs-v${{ inputs.bun_version }}-aarch64-unknown-linux-gnu.tar.zst
+            ${{ steps.checksums.outputs.sha_aarch64_darwin }}  bun-libs-v${{ inputs.bun_version }}-aarch64-apple-darwin.tar.zst
+            ```
           files: |
             artifacts/*.tar.zst
             artifacts/checksums-sha256.txt
+
+  # ---------------------------------------------------------------------------
+  # Update checksums, BUN_VERSION, Cargo.toml version, and commit
+  # ---------------------------------------------------------------------------
+
+  update-and-commit:
+    needs: [create-release]
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ steps.commit.outputs.sha }}
+    env:
+      SHA_X86_64_LINUX: ${{ needs.create-release.outputs.sha_x86_64_linux }}
+      SHA_AARCH64_LINUX: ${{ needs.create-release.outputs.sha_aarch64_linux }}
+      SHA_AARCH64_DARWIN: ${{ needs.create-release.outputs.sha_aarch64_darwin }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write BUN_VERSION
+        run: echo "$BUN_VERSION" > BUN_VERSION
+
+      - name: Update PREBUILT_CHECKSUMS in build.rs
+        run: |
+          python3 - <<'PYEOF'
+          import re, pathlib, os
+
+          sha_x86_64 = os.environ["SHA_X86_64_LINUX"]
+          sha_aarch64_linux = os.environ["SHA_AARCH64_LINUX"]
+          sha_aarch64_darwin = os.environ["SHA_AARCH64_DARWIN"]
+
+          new_checksums = (
+              'const PREBUILT_CHECKSUMS: &[(&str, &str)] = &[\n'
+              f'    ("x86_64-unknown-linux-gnu", "{sha_x86_64}"),\n'
+              f'    ("aarch64-unknown-linux-gnu", "{sha_aarch64_linux}"),\n'
+              f'    ("aarch64-apple-darwin", "{sha_aarch64_darwin}"),\n'
+              '];'
+          )
+
+          p = pathlib.Path("build.rs")
+          text = p.read_text()
+          text = re.sub(
+              r'const PREBUILT_CHECKSUMS:.*?\];',
+              new_checksums,
+              text,
+              flags=re.DOTALL,
+          )
+          p.write_text(text)
+          PYEOF
+
+      - name: Update Cargo.toml version
+        run: |
+          python3 - <<'PYEOF'
+          import re, pathlib, os
+
+          bun_version = os.environ["BUN_VERSION"]
+
+          p = pathlib.Path("Cargo.toml")
+          text = p.read_text()
+          # Match version = "X.Y.Z" or "X.Y.Z+anything"
+          text = re.sub(
+              r'^(version\s*=\s*")([^"+"]+)(\+[^"]*)?(")',
+              lambda m: f'{m.group(1)}{m.group(2)}+{bun_version}{m.group(4)}',
+              text,
+              flags=re.MULTILINE,
+          )
+          p.write_text(text)
+          PYEOF
+
+      - name: Install Rust (minimal)
+        run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+
+      - name: Update Cargo.lock
+        run: |
+          source "$HOME/.cargo/env"
+          cargo update --workspace
+
+      - name: Commit and push
+        id: commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add BUN_VERSION build.rs Cargo.toml Cargo.lock
+          git commit -m "chore: update to bun ${BUN_VERSION}
+
+          - Update BUN_VERSION
+          - Update prebuilt checksums in build.rs
+          - Update Cargo.toml version to match bun version"
+          git push
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # Publish to crates.io
+  # ---------------------------------------------------------------------------
+
+  publish-crate:
+    needs: [update-and-commit]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.update-and-commit.outputs.commit_sha }}
+
+      - name: Install Rust (minimal)
+        run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+
+      - name: Publish to crates.io
+        run: |
+          source "$HOME/.cargo/env"
+          cargo publish --allow-dirty
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

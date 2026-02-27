@@ -3,12 +3,6 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-// ---------------------------------------------------------------------------
-// Version (derived from Cargo.toml)
-// ---------------------------------------------------------------------------
-
-const BUN_VERSION: &str = env!("CARGO_PKG_VERSION");
-
 const GITHUB_RELEASE_BASE: &str =
     "https://github.com/cemelo/bun-sys/releases/download";
 
@@ -74,11 +68,11 @@ fn emit_link_directives(lib_dir: &str) {
 // Pre-built archive download
 // ---------------------------------------------------------------------------
 
-fn download_prebuilt(out_dir: &Path) -> PathBuf {
+fn download_prebuilt(out_dir: &Path, bun_version: &str) -> PathBuf {
     let target = env::var("TARGET").expect("TARGET not set");
     let cache_dir = out_dir.join("lib");
     let cache_key_file = cache_dir.join(".cache-key");
-    let expected_key = format!("prebuilt:v{BUN_VERSION}:{target}");
+    let expected_key = format!("prebuilt:v{bun_version}:{target}");
 
     // Cache hit?
     if cache_key_file.exists() {
@@ -100,7 +94,7 @@ fn download_prebuilt(out_dir: &Path) -> PathBuf {
         .find(|(t, _)| *t == target)
         .unwrap_or_else(|| {
             panic!(
-                "bun-sys: no pre-built archive for v{BUN_VERSION} target `{target}`. \
+                "bun-sys: no pre-built archive for v{bun_version} target `{target}`. \
                  Use `cargo build --features build-from-source` to build from source.",
             )
         })
@@ -108,14 +102,14 @@ fn download_prebuilt(out_dir: &Path) -> PathBuf {
 
     if expected_sha == "TODO" {
         panic!(
-            "bun-sys: pre-built archives have not been published yet for v{BUN_VERSION}. \
+            "bun-sys: pre-built archives have not been published yet for v{bun_version}. \
              Use `cargo build --features build-from-source` to build from source."
         );
     }
 
-    let archive_name = format!("bun-libs-v{BUN_VERSION}-{target}.tar.zst");
+    let archive_name = format!("bun-libs-v{bun_version}-{target}.tar.zst");
     let download_url = env::var("BUN_LIBS_URL").unwrap_or_else(|_| {
-        format!("{GITHUB_RELEASE_BASE}/libs-v{BUN_VERSION}/{archive_name}")
+        format!("{GITHUB_RELEASE_BASE}/libs-v{bun_version}/{archive_name}")
     });
 
     println!("cargo:warning=bun-sys: downloading pre-built libs from {download_url}");
@@ -230,9 +224,9 @@ fn find_file_recursive(dir: &Path, name: &str) -> Option<PathBuf> {
 }
 
 #[cfg(feature = "build-from-source")]
-fn build_from_source(out_dir: &Path) -> PathBuf {
+fn build_from_source(out_dir: &Path, bun_version: &str) -> PathBuf {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let bun_tag_default = format!("bun-v{BUN_VERSION}");
+    let bun_tag_default = format!("bun-v{bun_version}");
     let bun_tag = env::var("BUN_TAG").unwrap_or(bun_tag_default);
 
     let patch_dir = manifest_dir.join("patches");
@@ -456,6 +450,7 @@ fn build_from_source(out_dir: &Path) -> PathBuf {
 // ---------------------------------------------------------------------------
 
 fn main() {
+    let bun_version = include_str!("BUN_VERSION").trim();
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
     // Priority 1: explicit lib directory
@@ -471,16 +466,17 @@ fn main() {
     else if cfg!(feature = "build-from-source") {
         #[cfg(feature = "build-from-source")]
         {
-            build_from_source(&out_dir)
+            build_from_source(&out_dir, bun_version)
         }
         #[cfg(not(feature = "build-from-source"))]
         unreachable!()
     }
     // Priority 3: download pre-built archive
     else {
-        download_prebuilt(&out_dir)
+        download_prebuilt(&out_dir, bun_version)
     };
 
+    println!("cargo:rerun-if-changed=BUN_VERSION");
     println!("cargo:rerun-if-changed=patches");
     println!("cargo:rerun-if-env-changed=BUN_TAG");
     println!("cargo:rerun-if-env-changed=BUN_REPO");
