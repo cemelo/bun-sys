@@ -1,0 +1,28 @@
+diff --git a/cmake/targets/BuildBun.cmake b/cmake/targets/BuildBun.cmake
+index bf661a6..9cbb02e 100644
+--- a/cmake/targets/BuildBun.cmake
++++ b/cmake/targets/BuildBun.cmake
+@@ -1016,7 +1016,6 @@ if(NOT WIN32)
+       -Wno-unused-function
+       -Wno-c++23-lambda-attributes
+       -Wno-nullability-completeness
+-      -Wno-character-conversion
+       -Werror
+     )
+   else()
+@@ -1034,7 +1033,6 @@ if(NOT WIN32)
+       -Werror=sometimes-uninitialized
+       -Wno-c++23-lambda-attributes
+       -Wno-nullability-completeness
+-      -Wno-character-conversion
+       -Werror
+     )
+ 
+@@ -1063,7 +1061,6 @@ else()
+     -Wno-inconsistent-dllimport
+     -Wno-incompatible-pointer-types
+     -Wno-deprecated-declarations
+-    -Wno-character-conversion
+   )
+ endif()
+ 

@@ -4,31 +4,19 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
-// Version selection (driven by Cargo features)
+// Version (derived from Cargo.toml)
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "bun-1_3_9")]
-const BUN_VERSION: &str = "1.3.9";
-
-#[cfg(all(feature = "bun-1_3_3", not(feature = "bun-1_3_9")))]
-const BUN_VERSION: &str = "1.3.3";
-
-#[cfg(not(any(feature = "bun-1_3_3", feature = "bun-1_3_9")))]
-compile_error!("bun-sys: select a Bun version feature (e.g. bun-1_3_3, bun-1_3_9)");
+const BUN_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const GITHUB_RELEASE_BASE: &str =
     "https://github.com/cemelo/bun-sys/releases/download";
 
-/// Per-version, per-target checksums. Looked up by (version, target).
-const PREBUILT_CHECKSUMS: &[(&str, &str, &str)] = &[
-    // 1.3.3
-    ("1.3.3", "x86_64-unknown-linux-gnu", "TODO"),
-    ("1.3.3", "aarch64-unknown-linux-gnu", "TODO"),
-    ("1.3.3", "aarch64-apple-darwin", "TODO"),
-    // 1.3.9
-    ("1.3.9", "x86_64-unknown-linux-gnu", "TODO"),
-    ("1.3.9", "aarch64-unknown-linux-gnu", "TODO"),
-    ("1.3.9", "aarch64-apple-darwin", "TODO"),
+/// Per-target checksums for the current crate version.
+const PREBUILT_CHECKSUMS: &[(&str, &str)] = &[
+    ("x86_64-unknown-linux-gnu", "TODO"),
+    ("aarch64-unknown-linux-gnu", "TODO"),
+    ("aarch64-apple-darwin", "TODO"),
 ];
 
 const STATIC_LIBS: &[&str] = &[
@@ -109,14 +97,14 @@ fn download_prebuilt(out_dir: &Path) -> PathBuf {
     // Look up expected checksum
     let expected_sha = PREBUILT_CHECKSUMS
         .iter()
-        .find(|(v, t, _)| *v == BUN_VERSION && *t == target)
+        .find(|(t, _)| *t == target)
         .unwrap_or_else(|| {
             panic!(
                 "bun-sys: no pre-built archive for v{BUN_VERSION} target `{target}`. \
                  Use `cargo build --features build-from-source` to build from source.",
             )
         })
-        .2;
+        .1;
 
     if expected_sha == "TODO" {
         panic!(
@@ -247,15 +235,7 @@ fn build_from_source(out_dir: &Path) -> PathBuf {
     let bun_tag_default = format!("bun-v{BUN_VERSION}");
     let bun_tag = env::var("BUN_TAG").unwrap_or(bun_tag_default);
 
-    // Use version-specific patch directory (e.g. patches/1.3.3/) if it exists,
-    // otherwise fall back to the flat patches/ directory.
-    let bun_version = bun_tag.strip_prefix("bun-v").unwrap_or(&bun_tag);
-    let versioned_patch_dir = manifest_dir.join("patches").join(bun_version);
-    let patch_dir = if versioned_patch_dir.is_dir() {
-        versioned_patch_dir
-    } else {
-        manifest_dir.join("patches")
-    };
+    let patch_dir = manifest_dir.join("patches");
     let bun_repo = env::var("BUN_REPO").unwrap_or_else(|_| BUN_REPO_DEFAULT.into());
     let ninja_jobs = env::var("BUN_BUILD_JOBS").unwrap_or_else(|_| NINJA_JOBS_DEFAULT.into());
 
