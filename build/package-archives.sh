@@ -45,8 +45,8 @@ case "$(uname -s)" in
         ;;
 esac
 
-echo "Creating $ARCHIVE_NAME (zstd level 19)..." >&2
-tar -C "$STAGING" -cf - . | zstd -19 -o "$DIST_DIR/$ARCHIVE_NAME"
+echo "Creating $ARCHIVE_NAME (zstd level 3)..." >&2
+tar -C "$STAGING" -cf - . | zstd -3 -o "$DIST_DIR/$ARCHIVE_NAME"
 
 CHECKSUM="$(shasum -a 256 "$DIST_DIR/$ARCHIVE_NAME" | awk '{print $1}')"
 
