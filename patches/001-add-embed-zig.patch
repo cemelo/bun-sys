@@ -1,0 +1,1104 @@
+diff --git a/src/bun.js/embed.zig b/src/bun.js/embed.zig
+new file mode 100644
+index 0000000..b72137a
+--- /dev/null
++++ b/src/bun.js/embed.zig
+@@ -0,0 +1,1098 @@
++const EmbedRuntime = struct {
++    vm: *VirtualMachine,
++    global: *JSGlobalObject,
++    event_loop: *EventLoop,
++
++    registrar: ?HandlerRegistrar = null,
++
++    next_promise_id: std.atomic.Value(u64) = std.atomic.Value(u64).init(1),
++    promise_map: std.AutoHashMapUnmanaged(u64, PromiseEntry) = .{},
++    promise_mutex: std.Thread.Mutex = .{},
++
++    invoke_complete_cb: ?InvokeCompleteFn = null,
++    invoke_complete_ctx: ?*anyopaque = null,
++
++    shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
++
++    allocator: std.mem.Allocator,
++
++    native_closure_map: std.AutoHashMapUnmanaged(u64, *AsyncNativeClosure) = .{},
++    sync_native_closure_map: std.AutoHashMapUnmanaged(u64, *NativeClosure) = .{},
++    async_jsvalue_closure_map: std.AutoHashMapUnmanaged(u64, *AsyncNativeJsValueClosure) = .{},
++    invoke_closure_map: std.AutoHashMapUnmanaged(u64, *InvokeCompleteClosure) = .{},
++    invoke_callee_map: std.AutoHashMapUnmanaged(u64, u64) = .{},
++
++    const PromiseEntry = struct { value: JSValue };
++};
++
++const HandlerRegistrar = *const fn (
++    kind: [*:0]const u8,
++    name: [*:0]const u8,
++    event_type: ?[*:0]const u8,
++    fn_handle: *anyopaque,
++) callconv(.c) void;
++
++const AsyncNativeFn = *const fn (
++    ctx: ?*anyopaque,
++    promise_id: u64,
++    json_args: [*]const u8,
++    json_args_len: usize,
++) callconv(.c) void;
++
++const NativeFn = *const fn (
++    ctx: ?*anyopaque,
++    global: *anyopaque,
++    args: [*]const u64,
++    argc: usize,
++) callconv(.c) u64;
++
++const AsyncNativeJsValueFn = *const fn (
++    ctx: ?*anyopaque,
++    promise_id: u64,
++    global: *anyopaque,
++    args: [*]const u64,
++    argc: usize,
++) callconv(.c) void;
++
++const InvokeCompleteFn = *const fn (
++    ctx: ?*anyopaque,
++    promise_id: u64,
++    success: c_int,
++    json_result: [*]const u8,
++    json_result_len: usize,
++) callconv(.c) void;
++
++const DestructorFn = *const fn (ctx: ?*anyopaque) callconv(.c) void;
++
++const AsyncNativeClosure = struct {
++    rt: *EmbedRuntime,
++    native_fn: AsyncNativeFn,
++    ctx: ?*anyopaque,
++};
++
++const NativeClosure = struct {
++    rt: *EmbedRuntime,
++    native_fn: NativeFn,
++    ctx: ?*anyopaque,
++    destructor: ?DestructorFn = null,
++};
++
++const AsyncNativeJsValueClosure = struct {
++    rt: *EmbedRuntime,
++    native_fn: AsyncNativeJsValueFn,
++    ctx: ?*anyopaque,
++};
++
++const InvokeCompleteClosure = struct {
++    rt: *EmbedRuntime,
++    promise_id: u64,
++    then_callee: JSValue,
++    catch_callee: JSValue,
++};
++
++const ScheduleCallback = *const fn (ctx: ?*anyopaque) callconv(.c) void;
++
++const ScheduleCtx = struct {
++    callback: ScheduleCallback,
++    user_ctx: ?*anyopaque,
++    allocator: std.mem.Allocator,
++
++    pub fn run(self_ptr: *ScheduleCtx) bun.JSTerminated!void {
++        const self = self_ptr.*;
++        defer self.allocator.destroy(self_ptr);
++        self.callback(self.user_ctx);
++    }
++};
++
++inline fn jsValueKey(value: JSValue) u64 {
++    return @as(u64, @bitCast(@intFromEnum(value)));
++}
++
++inline fn jsValueHandle(value: JSValue) *anyopaque {
++    return @ptrFromInt(@as(usize, @bitCast(@intFromEnum(value))));
++}
++
++inline fn jsValueFromHandle(handle: *anyopaque) JSValue {
++    return JSValue.cast(handle);
++}
++
++inline fn jsValueToRaw(value: JSValue) u64 {
++    return @as(u64, @bitCast(@intFromEnum(value)));
++}
++
++inline fn jsValueFromRaw(raw: u64) JSValue {
++    return @enumFromInt(@as(i64, @bitCast(raw)));
++}
++
++// ---------------------------------------------------------------------------
++// Lifecycle
++// ---------------------------------------------------------------------------
++
++export fn bun_runtime_start(argc: c_int, argv: [*][*:0]u8, out_global: ?*u64) callconv(.c) ?*EmbedRuntime {
++    _ = argc;
++    _ = argv;
++
++    jsc.initialize(false);
++
++    const allocator = bun.default_allocator;
++
++    const vm = VirtualMachine.init(.{
++        .allocator = allocator,
++        .args = std.mem.zeroes(bun.schema.api.TransformOptions),
++        .is_main_thread = true,
++    }) catch return null;
++
++    vm.transpiler.configureDefines() catch return null;
++    vm.loadExtraEnvAndSourceCodePrinter();
++
++    const rt = allocator.create(EmbedRuntime) catch return null;
++    rt.* = .{
++        .vm = vm,
++        .global = vm.global,
++        .event_loop = vm.event_loop,
++        .allocator = allocator,
++    };
++
++    tls_runtime = rt;
++
++    if (out_global) |g| {
++        g.* = jsValueToRaw(vm.global.toJSValue());
++    }
++
++    return rt;
++}
++
++export fn bun_runtime_load_file(rt: ?*EmbedRuntime, path: [*:0]const u8) callconv(.c) c_int {
++    const self = rt orelse return -1;
++    const path_str = bun.String.init(std.mem.span(path));
++    const promise = JSModuleLoader.loadAndEvaluateModule(self.global, &path_str) orelse return -1;
++
++    const vm = self.global.vm();
++    switch (promise.status(vm)) {
++        .pending => {
++            self.vm.waitForPromise(.{ .internal = promise });
++            return switch (promise.status(vm)) {
++                .fulfilled => 0,
++                .rejected => -1,
++                .pending => -1,
++            };
++        },
++        .fulfilled => return 0,
++        .rejected => return -1,
++    }
++}
++
++export fn bun_runtime_run_event_loop(rt: ?*EmbedRuntime) callconv(.c) c_int {
++    const self = rt orelse return 0;
++    const ctx = self.vm;
++
++    // Mirror Bun CLI's watch-mode event loop (bun.js.zig):
++    //   while (true) {
++    //       while (vm.isEventLoopAlive()) { vm.tick(); eventLoop.autoTickActive(); }
++    //       vm.onBeforeExit();
++    //       eventLoop.tickPossiblyForever();  // blocks until wakeup
++    //   }
++    //
++    // We do one pass of the inner active-tick loop (drains microtasks,
++    // concurrent tasks, AND timers via autoTickActive), then block with
++    // tickPossiblyForever when idle.  Control returns to the Rust caller
++    // after each outer iteration so it can process load requests.
++
++    // Inner loop: drain all ready work including timers.
++    while (ctx.isEventLoopAlive()) {
++        if (self.shutdown_requested.load(.acquire)) return 0;
++        ctx.tick();
++        self.event_loop.autoTickActive();
++    }
++
++    if (self.shutdown_requested.load(.acquire)) return 0;
++
++    // Nothing active — block until something wakes the loop
++    // (bun_runtime_schedule, I/O, timer expiry, etc.).
++    ctx.onBeforeExit();
++    self.event_loop.tickPossiblyForever();
++
++    return if (self.shutdown_requested.load(.acquire)) 0 else 1;
++}
++
++export fn bun_runtime_request_stop(rt: ?*EmbedRuntime) callconv(.c) void {
++    const self = rt orelse return;
++    self.shutdown_requested.store(true, .release);
++    const task = self.allocator.create(ShutdownWakeTask) catch return;
++    task.* = .{ .allocator = self.allocator };
++    self.event_loop.enqueueTaskConcurrent(
++        ConcurrentTask.fromCallback(task, ShutdownWakeTask.callback),
++    );
++}
++
++export fn bun_runtime_stop(rt: ?*EmbedRuntime) callconv(.c) void {
++    const self = rt orelse return;
++
++    {
++        self.promise_mutex.lock();
++        defer self.promise_mutex.unlock();
++
++        var it = self.promise_map.iterator();
++        while (it.next()) |entry| {
++            entry.value_ptr.value.unprotect();
++        }
++        self.promise_map.deinit(self.allocator);
++    }
++
++    {
++        var cit = self.invoke_closure_map.iterator();
++        while (cit.next()) |entry| {
++            self.allocator.destroy(entry.value_ptr.*);
++        }
++        self.invoke_closure_map.deinit(self.allocator);
++    }
++
++    self.invoke_callee_map.deinit(self.allocator);
++
++    {
++        var nit = self.native_closure_map.iterator();
++        while (nit.next()) |entry| {
++            self.allocator.destroy(entry.value_ptr.*);
++        }
++        self.native_closure_map.deinit(self.allocator);
++    }
++
++    {
++        var sit = self.sync_native_closure_map.iterator();
++        while (sit.next()) |entry| {
++            const closure = entry.value_ptr.*;
++            if (closure.destructor) |dtor| {
++                dtor(closure.ctx);
++            }
++            self.allocator.destroy(closure);
++        }
++        self.sync_native_closure_map.deinit(self.allocator);
++    }
++
++    {
++        var ajit = self.async_jsvalue_closure_map.iterator();
++        while (ajit.next()) |entry| {
++            self.allocator.destroy(entry.value_ptr.*);
++        }
++        self.async_jsvalue_closure_map.deinit(self.allocator);
++    }
++
++    tls_runtime = null;
++    self.allocator.destroy(self);
++}
++
++export fn bun_runtime_global(rt: ?*EmbedRuntime) callconv(.c) ?*anyopaque {
++    const self = rt orelse return null;
++    return @ptrCast(self.global);
++}
++
++export fn bun_runtime_schedule(
++    rt: ?*EmbedRuntime,
++    callback: ?ScheduleCallback,
++    ctx: ?*anyopaque,
++) callconv(.c) void {
++    const self = rt orelse return;
++    const cb = callback orelse return;
++
++    const task = self.allocator.create(ScheduleCtx) catch return;
++    task.* = .{ .callback = cb, .user_ctx = ctx, .allocator = self.allocator };
++
++    self.event_loop.enqueueTaskConcurrent(
++        ConcurrentTask.fromCallback(task, ScheduleCtx.run),
++    );
++}
++
++const ShutdownWakeTask = struct {
++    allocator: std.mem.Allocator,
++
++    pub fn callback(self_ptr: *ShutdownWakeTask) bun.JSTerminated!void {
++        self_ptr.allocator.destroy(self_ptr);
++    }
++};
++
++// ---------------------------------------------------------------------------
++// Handler registration
++// ---------------------------------------------------------------------------
++
++export fn bun_runtime_set_registrar(rt: ?*EmbedRuntime, cb: ?HandlerRegistrar) callconv(.c) void {
++    const self = rt orelse return;
++    self.registrar = cb;
++
++    if (cb != null) {
++        const register_fn = JSFunction.create(
++            self.global,
++            bun.String.static("__registerHandler"),
++            registerHandlerHost,
++            4,
++            .{},
++        );
++        self.global.toJSValue().put(self.global, "__registerHandler", register_fn);
++    }
++}
++
++fn registerHandlerHost(global: *JSGlobalObject, callframe: *CallFrame) bun.JSError!JSValue {
++    const self = tls_runtime orelse return .js_undefined;
++    const registrar = self.registrar orelse return .js_undefined;
++
++    const args = callframe.argumentsAsArray(4);
++
++    var kind_buf: [256]u8 = undefined;
++    const kind_slice = jsValueToSlice(args[0], global, &kind_buf) orelse return .js_undefined;
++
++    var name_buf: [256]u8 = undefined;
++    const name_slice = jsValueToSlice(args[1], global, &name_buf) orelse return .js_undefined;
++
++    var et_buf: [256]u8 = undefined;
++    const et_ptr: ?[*:0]const u8 = if (args[2].isUndefinedOrNull())
++        null
++    else
++        if (jsValueToSlice(args[2], global, &et_buf)) |s| s.ptr else null;
++
++    args[3].protect();
++
++    registrar(kind_slice.ptr, name_slice.ptr, et_ptr, jsValueHandle(args[3]));
++
++    return .js_undefined;
++}
++
++// ---------------------------------------------------------------------------
++// Async native functions (JSON-based, legacy)
++// ---------------------------------------------------------------------------
++
++export fn bun_runtime_register_async_native(
++    rt: ?*EmbedRuntime,
++    name: [*:0]const u8,
++    func: ?AsyncNativeFn,
++    ctx: ?*anyopaque,
++) callconv(.c) void {
++    const self = rt orelse return;
++    const native_fn = func orelse return;
++
++    const closure = self.allocator.create(AsyncNativeClosure) catch return;
++    closure.* = .{ .rt = self, .native_fn = native_fn, .ctx = ctx };
++
++    const js_fn = JSFunction.create(
++        self.global,
++        bun.String.init(std.mem.span(name)),
++        asyncNativeHost,
++        1,
++        .{},
++    );
++
++    self.native_closure_map.put(self.allocator, jsValueKey(js_fn), closure) catch {};
++
++    self.global.toJSValue().put(self.global, std.mem.span(name), js_fn);
++}
++
++fn asyncNativeHost(global: *JSGlobalObject, callframe: *CallFrame) bun.JSError!JSValue {
++    const callee = callframe.callee();
++    const self = tls_runtime orelse return .js_undefined;
++    const closure = self.native_closure_map.get(jsValueKey(callee)) orelse return .js_undefined;
++
++    const promise_id = self.next_promise_id.fetchAdd(1, .monotonic);
++
++    const promise = JSInternalPromise.create(global);
++    const promise_val = promise.asValue();
++    promise_val.protect();
++
++    {
++        self.promise_mutex.lock();
++        defer self.promise_mutex.unlock();
++        self.promise_map.put(self.allocator, promise_id, .{ .value = promise_val }) catch {
++            promise_val.unprotect();
++            return .js_undefined;
++        };
++    }
++
++    const args = callframe.argumentsAsArray(1);
++    const json_slice = args[0].toSliceClone(global) orelse {
++        promise_val.unprotect();
++        self.promise_mutex.lock();
++        defer self.promise_mutex.unlock();
++        _ = self.promise_map.fetchRemove(promise_id);
++        return .js_undefined;
++    };
++    defer json_slice.deinit();
++
++    closure.native_fn(closure.ctx, promise_id, json_slice.ptr, json_slice.len);
++
++    return promise_val;
++}
++
++// ---------------------------------------------------------------------------
++// Sync native functions (JSValue-based)
++// ---------------------------------------------------------------------------
++
++export fn bun_runtime_register_native(
++    rt: ?*EmbedRuntime,
++    name: [*:0]const u8,
++    func: ?NativeFn,
++    ctx: ?*anyopaque,
++    destructor: ?DestructorFn,
++) callconv(.c) void {
++    const self = rt orelse return;
++    const native_fn = func orelse return;
++
++    const closure = self.allocator.create(NativeClosure) catch return;
++    closure.* = .{ .rt = self, .native_fn = native_fn, .ctx = ctx, .destructor = destructor };
++
++    const js_fn = JSFunction.create(
++        self.global,
++        bun.String.init(std.mem.span(name)),
++        syncNativeHost,
++        8,
++        .{},
++    );
++
++    self.sync_native_closure_map.put(self.allocator, jsValueKey(js_fn), closure) catch {};
++
++    self.global.toJSValue().put(self.global, std.mem.span(name), js_fn);
++}
++
++fn syncNativeHost(global: *JSGlobalObject, callframe: *CallFrame) bun.JSError!JSValue {
++    const callee = callframe.callee();
++    const self = tls_runtime orelse return .js_undefined;
++    const closure = self.sync_native_closure_map.get(jsValueKey(callee)) orelse return .js_undefined;
++
++    const raw_args = callframe.argumentsAsArray(8);
++    var raw_vals: [8]u64 = undefined;
++    var argc: usize = 0;
++    for (raw_args) |arg| {
++        if (arg == .zero) break;
++        raw_vals[argc] = jsValueToRaw(arg);
++        argc += 1;
++    }
++
++    const result_raw = closure.native_fn(closure.ctx, @ptrCast(global), &raw_vals, argc);
++    return jsValueFromRaw(result_raw);
++}
++
++// ---------------------------------------------------------------------------
++// Async native functions (JSValue-based)
++// ---------------------------------------------------------------------------
++
++export fn bun_runtime_register_async_native_jsvalue(
++    rt: ?*EmbedRuntime,
++    name: [*:0]const u8,
++    func: ?AsyncNativeJsValueFn,
++    ctx: ?*anyopaque,
++) callconv(.c) void {
++    const self = rt orelse return;
++    const native_fn = func orelse return;
++
++    const closure = self.allocator.create(AsyncNativeJsValueClosure) catch return;
++    closure.* = .{ .rt = self, .native_fn = native_fn, .ctx = ctx };
++
++    const js_fn = JSFunction.create(
++        self.global,
++        bun.String.init(std.mem.span(name)),
++        asyncNativeJsValueHost,
++        8,
++        .{},
++    );
++
++    self.async_jsvalue_closure_map.put(self.allocator, jsValueKey(js_fn), closure) catch {};
++
++    self.global.toJSValue().put(self.global, std.mem.span(name), js_fn);
++}
++
++fn asyncNativeJsValueHost(global: *JSGlobalObject, callframe: *CallFrame) bun.JSError!JSValue {
++    const callee = callframe.callee();
++    const self = tls_runtime orelse return .js_undefined;
++    const closure = self.async_jsvalue_closure_map.get(jsValueKey(callee)) orelse return .js_undefined;
++
++    const promise_id = self.next_promise_id.fetchAdd(1, .monotonic);
++
++    const promise = JSInternalPromise.create(global);
++    const promise_val = promise.asValue();
++    promise_val.protect();
++
++    {
++        self.promise_mutex.lock();
++        defer self.promise_mutex.unlock();
++        self.promise_map.put(self.allocator, promise_id, .{ .value = promise_val }) catch {
++            promise_val.unprotect();
++            return .js_undefined;
++        };
++    }
++
++    const raw_args = callframe.argumentsAsArray(8);
++    var raw_vals: [8]u64 = undefined;
++    var argc: usize = 0;
++    for (raw_args) |arg| {
++        if (arg == .zero) break;
++        raw_vals[argc] = jsValueToRaw(arg);
++        argc += 1;
++    }
++
++    closure.native_fn(closure.ctx, promise_id, @ptrCast(global), &raw_vals, argc);
++
++    return promise_val;
++}
++
++// ---------------------------------------------------------------------------
++// Anonymous function creation (JSValue-based)
++// ---------------------------------------------------------------------------
++
++export fn bun_jsvalue_create_function(
++    rt: ?*EmbedRuntime,
++    callback: ?NativeFn,
++    ctx: ?*anyopaque,
++    destructor: ?DestructorFn,
++) callconv(.c) u64 {
++    const self = rt orelse return jsValueToRaw(.js_undefined);
++    const native_fn = callback orelse return jsValueToRaw(.js_undefined);
++
++    const closure = self.allocator.create(NativeClosure) catch return jsValueToRaw(.js_undefined);
++    closure.* = .{ .rt = self, .native_fn = native_fn, .ctx = ctx, .destructor = destructor };
++
++    const js_fn = JSFunction.create(
++        self.global,
++        bun.String.static(""),
++        syncNativeHost,
++        8,
++        .{},
++    );
++
++    self.sync_native_closure_map.put(self.allocator, jsValueKey(js_fn), closure) catch {
++        if (destructor) |dtor| dtor(ctx);
++        self.allocator.destroy(closure);
++        return jsValueToRaw(.js_undefined);
++    };
++
++    return jsValueToRaw(js_fn);
++}
++
++// ---------------------------------------------------------------------------
++// Promise resolution (thread-safe via ConcurrentTask)
++// ---------------------------------------------------------------------------
++
++const EmbedResolveCtx = struct {
++    rt: *EmbedRuntime,
++    promise_id: u64,
++    json_result: []const u8,
++
++    pub fn callback(self_ptr: *EmbedResolveCtx) bun.JSTerminated!void {
++        const self = self_ptr.*;
++        defer self.rt.allocator.free(self.json_result);
++        defer self.rt.allocator.destroy(self_ptr);
++
++        const entry = blk: {
++            self.rt.promise_mutex.lock();
++            defer self.rt.promise_mutex.unlock();
++            break :blk self.rt.promise_map.fetchRemove(self.promise_id);
++        };
++
++        if (entry) |kv| {
++            const promise_val = kv.value.value;
++            defer promise_val.unprotect();
++
++            const global = self.rt.global;
++            const zstr = ZigString.init(self.json_result);
++            const parsed = zstr.toJSONObject(global);
++            const promise: *JSInternalPromise = @ptrCast(promise_val.asCell());
++            try promise.resolve(global, parsed);
++        }
++    }
++};
++
++export fn bun_runtime_resolve_promise(
++    rt: ?*EmbedRuntime,
++    promise_id: u64,
++    json_result: [*]const u8,
++    json_result_len: usize,
++) callconv(.c) void {
++    const self = rt orelse return;
++
++    const result_copy = self.allocator.alloc(u8, json_result_len) catch return;
++    @memcpy(result_copy, json_result[0..json_result_len]);
++
++    const ctx = self.allocator.create(EmbedResolveCtx) catch {
++        self.allocator.free(result_copy);
++        return;
++    };
++    ctx.* = .{ .rt = self, .promise_id = promise_id, .json_result = result_copy };
++
++    self.event_loop.enqueueTaskConcurrent(
++        ConcurrentTask.fromCallback(ctx, EmbedResolveCtx.callback),
++    );
++}
++
++const EmbedResolveJsValueCtx = struct {
++    rt: *EmbedRuntime,
++    promise_id: u64,
++    raw_value: u64,
++
++    pub fn callback(self_ptr: *EmbedResolveJsValueCtx) bun.JSTerminated!void {
++        const self = self_ptr.*;
++        defer self.rt.allocator.destroy(self_ptr);
++
++        const entry = blk: {
++            self.rt.promise_mutex.lock();
++            defer self.rt.promise_mutex.unlock();
++            break :blk self.rt.promise_map.fetchRemove(self.promise_id);
++        };
++
++        if (entry) |kv| {
++            const promise_val = kv.value.value;
++            defer promise_val.unprotect();
++
++            const value = jsValueFromRaw(self.raw_value);
++            const global = self.rt.global;
++            const promise: *JSInternalPromise = @ptrCast(promise_val.asCell());
++            try promise.resolve(global, value);
++        }
++    }
++};
++
++export fn bun_runtime_resolve_promise_jsvalue(
++    rt: ?*EmbedRuntime,
++    promise_id: u64,
++    raw_value: u64,
++) callconv(.c) void {
++    const self = rt orelse return;
++
++    const ctx = self.allocator.create(EmbedResolveJsValueCtx) catch return;
++    ctx.* = .{ .rt = self, .promise_id = promise_id, .raw_value = raw_value };
++
++    self.event_loop.enqueueTaskConcurrent(
++        ConcurrentTask.fromCallback(ctx, EmbedResolveJsValueCtx.callback),
++    );
++}
++
++const EmbedRejectCtx = struct {
++    rt: *EmbedRuntime,
++    promise_id: u64,
++    error_message: []const u8,
++
++    pub fn callback(self_ptr: *EmbedRejectCtx) bun.JSTerminated!void {
++        const self = self_ptr.*;
++        defer self.rt.allocator.free(self.error_message);
++        defer self.rt.allocator.destroy(self_ptr);
++
++        const entry = blk: {
++            self.rt.promise_mutex.lock();
++            defer self.rt.promise_mutex.unlock();
++            break :blk self.rt.promise_map.fetchRemove(self.promise_id);
++        };
++
++        if (entry) |kv| {
++            const promise_val = kv.value.value;
++            defer promise_val.unprotect();
++
++            const global = self.rt.global;
++            const err_str = bun.String.init(self.error_message);
++            const err_val = err_str.toJS(global);
++            const promise: *JSInternalPromise = @ptrCast(promise_val.asCell());
++            try promise.reject(global, err_val);
++        }
++    }
++};
++
++export fn bun_runtime_reject_promise(
++    rt: ?*EmbedRuntime,
++    promise_id: u64,
++    error_message: [*:0]const u8,
++) callconv(.c) void {
++    const self = rt orelse return;
++
++    const msg = std.mem.span(error_message);
++    const msg_copy = self.allocator.alloc(u8, msg.len) catch return;
++    @memcpy(msg_copy, msg);
++
++    const ctx = self.allocator.create(EmbedRejectCtx) catch {
++        self.allocator.free(msg_copy);
++        return;
++    };
++    ctx.* = .{ .rt = self, .promise_id = promise_id, .error_message = msg_copy };
++
++    self.event_loop.enqueueTaskConcurrent(
++        ConcurrentTask.fromCallback(ctx, EmbedRejectCtx.callback),
++    );
++}
++
++// ---------------------------------------------------------------------------
++// Handler invocation (thread-safe via ConcurrentTask)
++// ---------------------------------------------------------------------------
++
++export fn bun_runtime_invoke(
++    rt: ?*EmbedRuntime,
++    promise_id: u64,
++    fn_handle: *anyopaque,
++    json_args: [*]const u8,
++    json_args_len: usize,
++) callconv(.c) void {
++    const self = rt orelse return;
++
++    const args_copy = self.allocator.alloc(u8, json_args_len) catch return;
++    @memcpy(args_copy, json_args[0..json_args_len]);
++
++    const ctx = self.allocator.create(DeferredInvoke) catch {
++        self.allocator.free(args_copy);
++        return;
++    };
++    ctx.* = .{
++        .rt = self,
++        .promise_id = promise_id,
++        .fn_handle = fn_handle,
++        .json_args = args_copy,
++    };
++
++    self.event_loop.enqueueTaskConcurrent(
++        ConcurrentTask.fromCallback(ctx, DeferredInvoke.callback),
++    );
++}
++
++const DeferredInvoke = struct {
++    rt: *EmbedRuntime,
++    promise_id: u64,
++    fn_handle: *anyopaque,
++    json_args: []const u8,
++
++    pub fn callback(self_ptr: *DeferredInvoke) bun.JSTerminated!void {
++        const self = self_ptr.*;
++        defer self.rt.allocator.free(self.json_args);
++        defer self.rt.allocator.destroy(self_ptr);
++
++        const global = self.rt.global;
++        const fn_val = jsValueFromHandle(self.fn_handle);
++        const zstr = ZigString.init(self.json_args);
++        const parsed = zstr.toJSONObject(global);
++
++        const result = fn_val.call(global, .js_undefined, &.{parsed}) catch {
++            fireInvokeComplete(self.rt, self.promise_id, 0, "handler threw");
++            return;
++        };
++
++        if (result == .zero) {
++            fireInvokeComplete(self.rt, self.promise_id, 0, "handler returned zero");
++            return;
++        }
++
++        if (result.asPromise()) |_| {
++            const then_fn = JSFunction.create(global, bun.String.static(""), invokeCompleteThen, 1, .{});
++            const catch_fn = JSFunction.create(global, bun.String.static(""), invokeCompleteCatch, 1, .{});
++
++            const closure = self.rt.allocator.create(InvokeCompleteClosure) catch {
++                fireInvokeComplete(self.rt, self.promise_id, 0, "alloc failure");
++                return;
++            };
++            closure.* = .{
++                .rt = self.rt,
++                .promise_id = self.promise_id,
++                .then_callee = then_fn,
++                .catch_callee = catch_fn,
++            };
++
++            self.rt.invoke_closure_map.put(self.rt.allocator, self.promise_id, closure) catch {
++                self.rt.allocator.destroy(closure);
++                fireInvokeComplete(self.rt, self.promise_id, 0, "alloc failure");
++                return;
++            };
++            self.rt.invoke_callee_map.put(self.rt.allocator, jsValueKey(then_fn), self.promise_id) catch {};
++            self.rt.invoke_callee_map.put(self.rt.allocator, jsValueKey(catch_fn), self.promise_id) catch {};
++
++            const then_method = result.getPropertyValue(global, "then") catch null;
++            if (then_method) |method| {
++                _ = method.call(global, result, &.{ then_fn, catch_fn }) catch {};
++            }
++        } else {
++            var out = bun.String.dead;
++            result.jsonStringify(global, 0, &out) catch {
++                fireInvokeComplete(self.rt, self.promise_id, 0, "failed to serialize result");
++                return;
++            };
++            const slice = out.toUTF8(bun.default_allocator);
++            defer slice.deinit();
++            fireInvokeComplete(self.rt, self.promise_id, 1, slice.slice());
++        }
++    }
++};
++
++fn fireInvokeComplete(rt: *EmbedRuntime, promise_id: u64, success: c_int, data: []const u8) void {
++    if (rt.invoke_complete_cb) |cb| {
++        cb(rt.invoke_complete_ctx, promise_id, success, data.ptr, data.len);
++    }
++}
++
++fn invokeCompleteThen(global: *JSGlobalObject, callframe: *CallFrame) bun.JSError!JSValue {
++    const callee = callframe.callee();
++    const self = tls_runtime orelse return .js_undefined;
++
++    const promise_id = blk: {
++        const entry = self.invoke_callee_map.fetchRemove(jsValueKey(callee)) orelse return .js_undefined;
++        break :blk entry.value;
++    };
++
++    const closure = blk: {
++        const entry = self.invoke_closure_map.fetchRemove(promise_id) orelse return .js_undefined;
++        _ = self.invoke_callee_map.fetchRemove(jsValueKey(entry.value.catch_callee));
++        break :blk entry.value;
++    };
++    defer closure.rt.allocator.destroy(closure);
++
++    if (closure.rt.invoke_complete_cb) |cb| {
++        const args = callframe.argumentsAsArray(1);
++        var out = bun.String.dead;
++        try args[0].jsonStringify(global, 0, &out);
++        const slice = out.toUTF8(bun.default_allocator);
++        defer slice.deinit();
++        cb(closure.rt.invoke_complete_ctx, closure.promise_id, 1, slice.ptr, slice.len);
++    }
++    return .js_undefined;
++}
++
++fn invokeCompleteCatch(global: *JSGlobalObject, callframe: *CallFrame) bun.JSError!JSValue {
++    const callee = callframe.callee();
++    const self = tls_runtime orelse return .js_undefined;
++
++    const promise_id = blk: {
++        const entry = self.invoke_callee_map.fetchRemove(jsValueKey(callee)) orelse return .js_undefined;
++        break :blk entry.value;
++    };
++
++    const closure = blk: {
++        const entry = self.invoke_closure_map.fetchRemove(promise_id) orelse return .js_undefined;
++        _ = self.invoke_callee_map.fetchRemove(jsValueKey(entry.value.then_callee));
++        break :blk entry.value;
++    };
++    defer closure.rt.allocator.destroy(closure);
++
++    if (closure.rt.invoke_complete_cb) |cb| {
++        const err_args = callframe.argumentsAsArray(1);
++        const err_slice = err_args[0].toSliceClone(global) orelse {
++            const fallback = "unknown error";
++            cb(closure.rt.invoke_complete_ctx, closure.promise_id, 0, fallback.ptr, fallback.len);
++            return .js_undefined;
++        };
++        defer err_slice.deinit();
++        cb(closure.rt.invoke_complete_ctx, closure.promise_id, 0, err_slice.ptr, err_slice.len);
++    }
++    return .js_undefined;
++}
++
++export fn bun_runtime_set_invoke_complete(
++    rt: ?*EmbedRuntime,
++    cb: ?InvokeCompleteFn,
++    ctx: ?*anyopaque,
++) callconv(.c) void {
++    const self = rt orelse return;
++    self.invoke_complete_cb = cb;
++    self.invoke_complete_ctx = ctx;
++}
++
++// ---------------------------------------------------------------------------
++// JSValue C API
++// ---------------------------------------------------------------------------
++
++export fn bun_jsvalue_undefined() callconv(.c) u64 {
++    return jsValueToRaw(.js_undefined);
++}
++
++export fn bun_jsvalue_null() callconv(.c) u64 {
++    return jsValueToRaw(.null);
++}
++
++export fn bun_jsvalue_bool(v: c_int) callconv(.c) u64 {
++    return jsValueToRaw(if (v != 0) .true else .false);
++}
++
++export fn bun_jsvalue_int32(v: i32) callconv(.c) u64 {
++    return jsValueToRaw(JSValue.jsNumberFromInt32(v));
++}
++
++export fn bun_jsvalue_double(v: f64) callconv(.c) u64 {
++    return jsValueToRaw(JSValue.jsDoubleNumber(v));
++}
++
++export fn bun_jsvalue_string(global: ?*anyopaque, s: [*]const u8, len: usize) callconv(.c) u64 {
++    const g: *JSGlobalObject = @ptrCast(@alignCast(global orelse return jsValueToRaw(.js_undefined)));
++    const str = bun.String.init(s[0..len]);
++    return jsValueToRaw(str.toJS(g));
++}
++
++export fn bun_jsvalue_object(global: ?*anyopaque) callconv(.c) u64 {
++    const g: *JSGlobalObject = @ptrCast(@alignCast(global orelse return jsValueToRaw(.js_undefined)));
++    return jsValueToRaw(JSValue.createEmptyObject(g, 0));
++}
++
++export fn bun_jsvalue_array(global: ?*anyopaque, len: usize) callconv(.c) u64 {
++    const g: *JSGlobalObject = @ptrCast(@alignCast(global orelse return jsValueToRaw(.js_undefined)));
++    const arr = JSValue.createEmptyArray(g, len) catch return jsValueToRaw(.js_undefined);
++    return jsValueToRaw(arr);
++}
++
++export fn bun_jsvalue_is_undefined(v: u64) callconv(.c) c_int {
++    return if (jsValueFromRaw(v).isUndefined()) 1 else 0;
++}
++
++export fn bun_jsvalue_is_null(v: u64) callconv(.c) c_int {
++    return if (jsValueFromRaw(v).isNull()) 1 else 0;
++}
++
++export fn bun_jsvalue_is_boolean(v: u64) callconv(.c) c_int {
++    return if (jsValueFromRaw(v).isBoolean()) 1 else 0;
++}
++
++export fn bun_jsvalue_is_number(v: u64) callconv(.c) c_int {
++    return if (jsValueFromRaw(v).isNumber()) 1 else 0;
++}
++
++export fn bun_jsvalue_is_string(v: u64) callconv(.c) c_int {
++    return if (jsValueFromRaw(v).isString()) 1 else 0;
++}
++
++export fn bun_jsvalue_is_object(v: u64) callconv(.c) c_int {
++    return if (jsValueFromRaw(v).isObject()) 1 else 0;
++}
++
++export fn bun_jsvalue_is_function(v: u64) callconv(.c) c_int {
++    const val = jsValueFromRaw(v);
++    return if (val.isCallable()) 1 else 0;
++}
++
++export fn bun_jsvalue_is_cell(v: u64) callconv(.c) c_int {
++    return if (jsValueFromRaw(v).isCell()) 1 else 0;
++}
++
++export fn bun_jsvalue_to_bool(v: u64) callconv(.c) c_int {
++    return if (jsValueFromRaw(v).toBoolean()) 1 else 0;
++}
++
++export fn bun_jsvalue_as_int32(v: u64) callconv(.c) i32 {
++    const val = jsValueFromRaw(v);
++    if (val.isInt32()) {
++        return val.toInt32();
++    }
++    return 0;
++}
++
++export fn bun_jsvalue_to_double(global: ?*anyopaque, v: u64) callconv(.c) f64 {
++    _ = global;
++    const val = jsValueFromRaw(v);
++    if (val.isNumber()) {
++        return val.asNumber();
++    }
++    return 0.0;
++}
++
++var string_return_buf: [4096]u8 = undefined;
++
++export fn bun_jsvalue_to_string(global: ?*anyopaque, v: u64, out_len: *usize) callconv(.c) [*]const u8 {
++    const g: *JSGlobalObject = @ptrCast(@alignCast(global orelse {
++        out_len.* = 0;
++        return &string_return_buf;
++    }));
++    const val = jsValueFromRaw(v);
++    const slice = val.toSliceClone(g) orelse {
++        out_len.* = 0;
++        return &string_return_buf;
++    };
++    out_len.* = slice.len;
++    return slice.ptr;
++}
++
++export fn bun_free_string(s: [*]const u8) callconv(.c) void {
++    _ = s;
++}
++
++export fn bun_jsvalue_get(global: ?*anyopaque, obj: u64, key: [*]const u8, key_len: usize) callconv(.c) u64 {
++    const g: *JSGlobalObject = @ptrCast(@alignCast(global orelse return jsValueToRaw(.js_undefined)));
++    const js_obj = jsValueFromRaw(obj);
++    const result = js_obj.getPropertyValue(g, key[0..key_len]) catch return jsValueToRaw(.js_undefined);
++    return if (result) |val| jsValueToRaw(val) else jsValueToRaw(.js_undefined);
++}
++
++export fn bun_jsvalue_set(global: ?*anyopaque, obj: u64, key: [*]const u8, key_len: usize, val: u64) callconv(.c) void {
++    const g: *JSGlobalObject = @ptrCast(@alignCast(global orelse return));
++    const js_obj = jsValueFromRaw(obj);
++    const js_val = jsValueFromRaw(val);
++    js_obj.put(g, key[0..key_len], js_val);
++}
++
++export fn bun_jsvalue_get_index(global: ?*anyopaque, arr: u64, idx: u32) callconv(.c) u64 {
++    const g: *JSGlobalObject = @ptrCast(@alignCast(global orelse return jsValueToRaw(.js_undefined)));
++    const js_arr = jsValueFromRaw(arr);
++    const val = js_arr.getIndex(g, idx) catch return jsValueToRaw(.js_undefined);
++    return jsValueToRaw(val);
++}
++
++export fn bun_jsvalue_set_index(global: ?*anyopaque, arr: u64, idx: u32, val: u64) callconv(.c) void {
++    const g: *JSGlobalObject = @ptrCast(@alignCast(global orelse return));
++    const js_arr = jsValueFromRaw(arr);
++    const js_val = jsValueFromRaw(val);
++    js_arr.putIndex(g, idx, js_val) catch {};
++}
++
++export fn bun_jsvalue_call(global: ?*anyopaque, func: u64, this: u64, args: [*]const u64, argc: usize) callconv(.c) u64 {
++    const g: *JSGlobalObject = @ptrCast(@alignCast(global orelse return jsValueToRaw(.js_undefined)));
++    const js_func = jsValueFromRaw(func);
++    const js_this = jsValueFromRaw(this);
++
++    var js_args: [16]JSValue = undefined;
++    const count = @min(argc, 16);
++    for (0..count) |i| {
++        js_args[i] = jsValueFromRaw(args[i]);
++    }
++
++    const result = js_func.call(g, js_this, js_args[0..count]) catch {
++        return jsValueToRaw(.js_undefined);
++    };
++    return jsValueToRaw(result);
++}
++
++export fn bun_jsvalue_has_exception(global: ?*anyopaque) callconv(.c) c_int {
++    const g: *JSGlobalObject = @ptrCast(@alignCast(global orelse return 0));
++    const vm = g.vm();
++    _ = vm;
++    return 0;
++}
++
++export fn bun_jsvalue_get_exception(global: ?*anyopaque) callconv(.c) u64 {
++    _ = global;
++    return jsValueToRaw(.js_undefined);
++}
++
++export fn bun_jsvalue_clear_exception(global: ?*anyopaque) callconv(.c) void {
++    _ = global;
++}
++
++export fn bun_jsvalue_protect(rt: ?*EmbedRuntime, v: u64) callconv(.c) void {
++    _ = rt;
++    jsValueFromRaw(v).protect();
++}
++
++export fn bun_jsvalue_unprotect(rt: ?*EmbedRuntime, v: u64) callconv(.c) void {
++    _ = rt;
++    jsValueFromRaw(v).unprotect();
++}
++
++// ---------------------------------------------------------------------------
++// Helpers
++// ---------------------------------------------------------------------------
++
++threadlocal var tls_runtime: ?*EmbedRuntime = null;
++
++fn jsValueToSlice(val: JSValue, global: *JSGlobalObject, buf: []u8) ?[:0]const u8 {
++    const slice = val.toSliceClone(global) orelse return null;
++    defer slice.deinit();
++    const s = slice.slice();
++    if (s.len >= buf.len) return null;
++    @memcpy(buf[0..s.len], s);
++    buf[s.len] = 0;
++    return buf[0..s.len :0];
++}
++
++const std = @import("std");
++const bun = @import("bun");
++const jsc = bun.jsc;
++const JSValue = jsc.JSValue;
++const JSGlobalObject = jsc.JSGlobalObject;
++const JSInternalPromise = jsc.JSInternalPromise;
++const JSFunction = jsc.JSFunction;
++const JSModuleLoader = jsc.JSModuleLoader;
++const CallFrame = jsc.CallFrame;
++const EventLoop = jsc.EventLoop;
++const VirtualMachine = jsc.VirtualMachine;
++const ConcurrentTask = jsc.ConcurrentTask;
++const ZigString = jsc.ZigString;

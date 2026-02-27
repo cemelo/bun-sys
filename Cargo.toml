@@ -1,0 +1,19 @@
+[package]
+name = "bun-sys"
+version = "0.0.1"
+edition = "2021"
+links = "bun"
+description = "Raw FFI bindings for embedding Bun as a static library"
+license = "MIT"
+repository = "https://github.com/cemelo/bun-sys"
+
+[features]
+default = []
+build-from-source = []
+
+[build-dependencies]
+cc = "1"
+sha2 = "0.10"
+tar = "0.4"
+ureq = { version = "3", features = ["rustls"] }
+zstd = "0.13"
