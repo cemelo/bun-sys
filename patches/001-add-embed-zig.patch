@@ -1,6 +1,6 @@
 diff --git a/src/bun.js/embed.zig b/src/bun.js/embed.zig
 new file mode 100644
-index 0000000..b72137a
+index 0000000..6987c9d
 --- /dev/null
 +++ b/src/bun.js/embed.zig
 @@ -0,0 +1,1098 @@
@@ -173,11 +173,10 @@ index 0000000..b72137a
 +    const path_str = bun.String.init(std.mem.span(path));
 +    const promise = JSModuleLoader.loadAndEvaluateModule(self.global, &path_str) orelse return -1;
 +
-+    const vm = self.global.vm();
-+    switch (promise.status(vm)) {
++    switch (promise.status()) {
 +        .pending => {
 +            self.vm.waitForPromise(.{ .internal = promise });
-+            return switch (promise.status(vm)) {
++            return switch (promise.status()) {
 +                .fulfilled => 0,
 +                .rejected => -1,
 +                .pending => -1,
@@ -411,7 +410,7 @@ index 0000000..b72137a
 +    }
 +
 +    const args = callframe.argumentsAsArray(1);
-+    const json_slice = args[0].toSliceClone(global) orelse {
++    const json_slice = args[0].toSliceClone(global) catch {
 +        promise_val.unprotect();
 +        self.promise_mutex.lock();
 +        defer self.promise_mutex.unlock();
@@ -688,7 +687,7 @@ index 0000000..b72137a
 +
 +            const global = self.rt.global;
 +            const err_str = bun.String.init(self.error_message);
-+            const err_val = err_str.toJS(global);
++            const err_val = err_str.toJS(global) catch return;
 +            const promise: *JSInternalPromise = @ptrCast(promise_val.asCell());
 +            try promise.reject(global, err_val);
 +        }
@@ -866,7 +865,7 @@ index 0000000..b72137a
 +
 +    if (closure.rt.invoke_complete_cb) |cb| {
 +        const err_args = callframe.argumentsAsArray(1);
-+        const err_slice = err_args[0].toSliceClone(global) orelse {
++        const err_slice = err_args[0].toSliceClone(global) catch {
 +            const fallback = "unknown error";
 +            cb(closure.rt.invoke_complete_ctx, closure.promise_id, 0, fallback.ptr, fallback.len);
 +            return .js_undefined;
@@ -914,7 +913,8 @@ index 0000000..b72137a
 +export fn bun_jsvalue_string(global: ?*anyopaque, s: [*]const u8, len: usize) callconv(.c) u64 {
 +    const g: *JSGlobalObject = @ptrCast(@alignCast(global orelse return jsValueToRaw(.js_undefined)));
 +    const str = bun.String.init(s[0..len]);
-+    return jsValueToRaw(str.toJS(g));
++    const js_val = str.toJS(g) catch return jsValueToRaw(.js_undefined);
++    return jsValueToRaw(js_val);
 +}
 +
 +export fn bun_jsvalue_object(global: ?*anyopaque) callconv(.c) u64 {
@@ -990,7 +990,7 @@ index 0000000..b72137a
 +        return &string_return_buf;
 +    }));
 +    const val = jsValueFromRaw(v);
-+    const slice = val.toSliceClone(g) orelse {
++    const slice = val.toSliceClone(g) catch {
 +        out_len.* = 0;
 +        return &string_return_buf;
 +    };
@@ -1080,7 +1080,7 @@ index 0000000..b72137a
 +threadlocal var tls_runtime: ?*EmbedRuntime = null;
 +
 +fn jsValueToSlice(val: JSValue, global: *JSGlobalObject, buf: []u8) ?[:0]const u8 {
-+    const slice = val.toSliceClone(global) orelse return null;
++    const slice = val.toSliceClone(global) catch return null;
 +    defer slice.deinit();
 +    const s = slice.slice();
 +    if (s.len >= buf.len) return null;

@@ -1,5 +1,5 @@
 diff --git a/src/bun.js.zig b/src/bun.js.zig
-index 84ab501..934035d 100644
+index d7abd36..745b77a 100644
 --- a/src/bun.js.zig
 +++ b/src/bun.js.zig
 @@ -2,6 +2,11 @@ pub const jsc = @import("./bun.js/jsc.zig");
